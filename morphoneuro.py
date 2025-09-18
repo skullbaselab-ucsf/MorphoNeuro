@@ -96,6 +96,11 @@ def init_props():
         default=9,
         min=0
     )
+    bpy.types.Scene.nv_create_without_apex = bpy.props.BoolProperty(
+        name="Flat surfaces",
+        description="Create base mesh only without connecting to an apex vertex",
+        default=False
+    )
     
     # Manual selection collapsible section
     bpy.types.Scene.show_manual_selection_options = bpy.props.BoolProperty(
@@ -226,6 +231,7 @@ def clear_props():
     del bpy.types.Scene.show_neuronavigation_options
     del bpy.types.Scene.nv_coords_filepath
     del bpy.types.Scene.nv_grouping_number
+    del bpy.types.Scene.nv_create_without_apex
     
     # Manual Selection properties
     del bpy.types.Scene.show_manual_selection_options
@@ -335,17 +341,37 @@ def calculate_centroid(vectors):
 def find_apex_and_base(obj):
     """Find apex (vertex with most connections) and base vertices of a mesh.
     
-    The apex is the vertex with the most connections.
-    Base vertices are only those directly connected to the apex via edges.
+    The apex is the vertex with the most connections. If no vertex has more than 2 connections,
+    there is no apex and all vertices are treated as base vertices.
+    Base vertices are only those directly connected to the apex via edges (if apex exists),
+    otherwise all vertices are base vertices.
     
     Args:
         obj: Blender mesh object
         
     Returns:
-        tuple: (apex_world_coord, base_world_coords)
+        tuple: (apex_world_coord or None, base_world_coords)
     """
     bm = bmesh.new()
     bm.from_mesh(obj.data)
+    
+    # Find the vertex with the most connections
+    max_connections = max(len(v.link_edges) for v in bm.verts) if bm.verts else 0
+    
+    # If no vertex has more than 2 connections, there's no apex
+    if max_connections <= 2:
+        # All vertices are base vertices
+        base_verts = list(bm.verts)
+        base_verts.sort(key=lambda v: v.index)
+        
+        print(f"No apex found (max connections: {max_connections}). All {len(base_verts)} vertices treated as base.")
+        
+        # Convert to world coordinates
+        apex_world = None
+        base_world = [obj.matrix_world @ v.co for v in base_verts]
+        
+        bm.free()
+        return apex_world, base_world
     
     # Find the vertex with the most connections (apex)
     apex_vert = max(bm.verts, key=lambda v: len(v.link_edges))
@@ -359,7 +385,7 @@ def find_apex_and_base(obj):
     # Respect the order of the base vertices
     base_verts.sort(key=lambda v: v.index)
     
-    print(f"Number of base vertices: {len(base_verts)}")
+    print(f"Apex found with {len(apex_vert.link_edges)} connections. Number of base vertices: {len(base_verts)}")
     
     # Convert to world coordinates
     apex_world = obj.matrix_world @ apex_vert.co
@@ -1236,21 +1262,25 @@ class OBJECT_OT_create_volume_of_surgical_corridor(bpy.types.Operator):
             # Get the current apex and base vertices from the decimated mesh
             current_apex, current_base_vertices = find_apex_and_base(vof_obj)
             
-            # Create a new spherical cap mesh based on the decimated mesh
-            spherical_obj = create_spherical_cap_mesh(
-                current_apex, 
-                current_base_vertices, 
-                f"Volume of corridor normalized", 
-                radius=self.distance_from_apex
-            )
-            
-            # Set the new normalized mesh as active
-            bpy.context.view_layer.objects.active = spherical_obj
-            vof_obj.select_set(False)
-            spherical_obj.select_set(True)
+            # Only create spherical cap if we have an apex
+            if current_apex is not None:
+                # Create a new spherical cap mesh based on the decimated mesh
+                spherical_obj = create_spherical_cap_mesh(
+                    current_apex, 
+                    current_base_vertices, 
+                    f"Volume of corridor normalized", 
+                    radius=self.distance_from_apex
+                )
+                
+                # Set the new normalized mesh as active
+                bpy.context.view_layer.objects.active = spherical_obj
+                vof_obj.select_set(False)
+                spherical_obj.select_set(True)
 
-            # Delete the original Volume of Surgical Corridor object
-            bpy.data.objects.remove(vof_obj, do_unlink=True)
+                # Delete the original Volume of Surgical Corridor object
+                bpy.data.objects.remove(vof_obj, do_unlink=True)
+            else:
+                print(f"Warning: Cannot create spherical cap for '{vof_obj.name}' - no apex found")
         
         self.report({'INFO'}, "Volume of surgical corridor created.")
         bpy.ops.object.mode_set(mode=original_mode)
@@ -1278,6 +1308,12 @@ class OBJECT_OT_create_neuronavigation(bpy.types.Operator):
         description="Number of coordinates per group (0 for no grouping)",
         default=9,
         min=0
+    )
+    
+    create_without_apex: bpy.props.BoolProperty(
+        name="Create Without Apex",
+        description="Create base mesh only without connecting to an apex vertex",
+        default=False
     )
     
     def parse_dat_txt_file(self, filepath):
@@ -1337,6 +1373,7 @@ class OBJECT_OT_create_neuronavigation(bpy.types.Operator):
         
         # Get grouping number from scene property
         self.grouping_number = context.scene.nv_grouping_number
+        self.create_without_apex = context.scene.nv_create_without_apex
         
         # Check file extension to determine how to process it
         file_ext = os.path.splitext(filepath)[1].lower()
@@ -1373,31 +1410,44 @@ class OBJECT_OT_create_neuronavigation(bpy.types.Operator):
             bm_verts = [bm.verts.new(Vector(coord)) for coord in group]
             bm.verts.index_update()
             
-            apex = bm_verts[0]
-            base_verts = bm_verts[1:]
-            try:
-                bm.faces.new(base_verts)
-            except Exception as e:
-                print("Base face creation failed:", e)
-            
-            n = len(base_verts)
-            for i in range(n):
-                v1 = base_verts[i]
-                v2 = base_verts[(i + 1) % n]
+            if self.create_without_apex:
+                # Create base-only mesh without apex
+                base_verts = bm_verts  # All coordinates are base vertices
+                # Create the base face (if there are enough vertices)
+                if len(base_verts) >= 3:
+                    try:
+                        bm.faces.new(base_verts)
+                    except Exception as e:
+                        print("Base face creation failed:", e)
+                apex_coord = None
+                base_coords = [v.co.copy() for v in base_verts]
+            else:
+                # Original behavior: first coordinate is apex, rest are base
+                apex = bm_verts[0]
+                base_verts = bm_verts[1:]
                 try:
-                    bm.faces.new([apex, v1, v2])
+                    bm.faces.new(base_verts)
                 except Exception as e:
-                    print("Side face creation failed:", e)
-            
-            apex_coord = apex.co.copy()
-            base_coords = [v.co.copy() for v in base_verts]
+                    print("Base face creation failed:", e)
+                
+                n = len(base_verts)
+                for j in range(n):
+                    v1 = base_verts[j]
+                    v2 = base_verts[(j + 1) % n]
+                    try:
+                        bm.faces.new([apex, v1, v2])
+                    except Exception as e:
+                        print("Side face creation failed:", e)
+                
+                apex_coord = apex.co.copy()
+                base_coords = [v.co.copy() for v in base_verts]
             
             bm.to_mesh(mesh)
             bm.free()
             make_normals_consistent(obj)
             
-            # Create a spherical cap mesh if requested
-            if self.use_spherical_geometry:
+            # Create a spherical cap mesh if requested (only when apex exists)
+            if self.use_spherical_geometry and not self.create_without_apex and apex_coord is not None:
                 create_spherical_cap_mesh(apex_coord, base_coords, name + " normalized", radius=100.0)
 
         self.report({'INFO'}, "Neuronavigation surgical corridors created.")
@@ -1531,14 +1581,16 @@ class OBJECT_OT_calculate_volume(bpy.types.Operator):
         use_spherical_geometry = False
         apex, base_vertices = find_apex_and_base(obj)
 
-        # Calculate the radius of the sphere
-        radius = (apex - base_vertices[0]).length
+        # Only check for spherical geometry if we have an apex
+        if apex is not None:
+            # Calculate the radius of the sphere
+            radius = (apex - base_vertices[0]).length
 
-        # If all base vertices are at the same distance from the apex, the mesh is on a sphere
-        if all(abs((v - apex).length - radius) < 1e-3 for v in base_vertices):
-            use_spherical_geometry = True
+            # If all base vertices are at the same distance from the apex, the mesh is on a sphere
+            if all(abs((v - apex).length - radius) < 1e-3 for v in base_vertices):
+                use_spherical_geometry = True
         
-        if use_spherical_geometry:
+        if use_spherical_geometry and apex is not None:
 
             # Calculate the area of the spherical cap
             spherical_cap_area = calculate_spherical_cap_area(apex, base_vertices, radius)
@@ -1749,22 +1801,24 @@ class OBJECT_OT_calculate_area(bpy.types.Operator):
             is_sphere = False
             apex, base_vertices = find_apex_and_base(obj)
 
-            # Calculate the radius of the sphere
-            radius = (apex - base_vertices[0]).length
+            # Check if we have an apex (for cone/pyramid shapes) or just a base (for flat polygons)
+            if apex is not None:
+                # Calculate the radius of the sphere
+                radius = (apex - base_vertices[0]).length
 
-            # If all base vertices are at the same distance from the apex, the mesh is on a sphere
-            if all(abs((v - apex).length - radius) < 1e-3 for v in base_vertices):
-                is_sphere = True
-            
-            if is_sphere:
-                # Calculate the area of the spherical cap
-                spherical_cap_area = calculate_spherical_cap_area(apex, base_vertices, radius)
-
-                # Calculate the area of the mesh
-                total_area = spherical_cap_area
-
-            else:
+                # If all base vertices are at the same distance from the apex, the mesh is on a sphere
+                if all(abs((v - apex).length - radius) < 1e-3 for v in base_vertices):
+                    is_sphere = True
                 
+                if is_sphere:
+                    # Calculate the area of the spherical cap
+                    spherical_cap_area = calculate_spherical_cap_area(apex, base_vertices, radius)
+                    # Calculate the area of the mesh
+                    total_area = spherical_cap_area
+                else:
+                    total_area = self.normalize_and_apply_shoelace(obj, base_vertices)
+            else:
+                # No apex found - treat as flat polygon
                 total_area = self.normalize_and_apply_shoelace(obj, base_vertices)
             
             bm.free()
@@ -2140,6 +2194,11 @@ class OBJECT_OT_normalize_mesh_height(bpy.types.Operator):
         """Normalize a single mesh."""
         # Get apex and base vertices
         apex, base_vertices = find_apex_and_base(obj)
+
+        # Check if we have an apex - normalization requires an apex
+        if apex is None:
+            print(f"Warning: Cannot normalize mesh '{obj.name}' - no apex found (flat polygon)")
+            return None
 
         use_spherical_geometry = self.projection_method == 'SPHERICAL'
         use_least_squares = self.projection_method == 'LEAST_SQUARES'
@@ -2968,12 +3027,14 @@ class VIEW3D_PT_morphoneuro(bpy.types.Panel):
         button_split = label_split.split(factor=1)
         op = button_split.operator("object.create_neuronavigation", text="Create")
         op.grouping_number = scene.nv_grouping_number
+        op.create_without_apex = scene.nv_create_without_apex
 
         # Show Neuronavigation options if expanded
         if scene.show_neuronavigation_options:
             col = box.column(align=True)
             col.prop(scene, "nv_coords_filepath")
             col.prop(scene, "nv_grouping_number")
+            col.prop(scene, "nv_create_without_apex")
         
         # Manual selection Section (collapsible)
         box = layout.box()

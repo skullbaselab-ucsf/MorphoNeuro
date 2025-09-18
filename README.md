@@ -2,6 +2,14 @@
 
 MorphoNeuro is a Blender add-on designed for importing, constructing, and analyzing 3D neurosurgical corridors, either using neuronavigation coordinates or 3D meshes (surface or volumes). Meshes can be built using surface scanning techniques or traditional medical imaging (CT, MRI). MorphoNeuro has been tested on surface scans.
 
+## Citation
+
+If you use MorphoNeuro, please cite:
+
+```
+Sinosi FA, Rubio RR. An Open Source Tool to Conduct 3D Morphometric Analysis of Microneurosurgical Corridors: Technical Note and Anatomical Validation Study using Surface Scanning Techniques. World Neurosurg. 2025 Aug 13:124378. doi: 10.1016/j.wneu.2025.124378. PMID: 40816444.
+```
+
 ## Requirements
 - Blender 4.2 or newer (older versions might be compatible, but have not been tested)
 
@@ -27,6 +35,7 @@ Creates a volumetric surgical corridor either importing coordinates from externa
 2.  Hit "Create"
 - **Options**
     **Grouping:** Coordinates are grouped based on the `Grouping Number`. Useful if you're exporting a single file with a lot of coordinates and you have a fixed number of coordinates per target. The first point in each group becomes the apex, the rest form the base. Set to 0 to disable. Parsed `.dat`/`.txt` data is automatically saved as a `.json` file alongside the original.
+    **Create Without Apex:** When enabled, treats all coordinates as base vertices and creates only the base polygon without connecting to an apex vertex. Useful for flat surface or polygon representations.
 
 #### Manual Selection to Mesh
 1.  Enter Edit Mode on a mesh
